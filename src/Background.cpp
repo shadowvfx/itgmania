@@ -122,7 +122,7 @@ class BackgroundImpl : public ActorFrame {
                              // may not be loaded into m_BGAnimations.
 
   void LoadFromRandom(
-      float fFirstBeat, float fEndBeat, const BackgroundChange& change);
+      float fFirstBeat, float fEndBeat, const BackgroundChange& change, bool bUseRandomStartBeat);
   bool IsDangerAllVisible();
 
   class Layer {
@@ -480,7 +480,7 @@ BackgroundDef BackgroundImpl::Layer::CreateRandomBGA(
 }
 
 void BackgroundImpl::LoadFromRandom(
-    float fFirstBeat, float fEndBeat, const BackgroundChange& change) {
+    float fFirstBeat, float fEndBeat, const BackgroundChange& change, bool bUseRandomStartBeat) {
   int iStartRow = BeatToNoteRow(fFirstBeat);
   int iEndRow = BeatToNoteRow(fEndBeat);
 
@@ -504,7 +504,7 @@ void BackgroundImpl::LoadFromRandom(
       if (!bd.IsEmpty()) {
         BackgroundChange c = change;
         c.m_def = bd;
-        if (j == time_signature_start && i == 0) {
+        if (bUseRandomStartBeat && j == time_signature_start && i == 0) {
           c.m_fStartBeat = RAND_BG_START_BEAT;
         } else {
           c.m_fStartBeat = NoteRowToBeat(j);
@@ -658,7 +658,7 @@ void BackgroundImpl::LoadFromSong(const Song* pSong) {
     float firstBeat = pSong->GetFirstBeat();
     float lastBeat = pSong->GetLastBeat();
 
-    LoadFromRandom(firstBeat, lastBeat, BackgroundChange());
+    LoadFromRandom(firstBeat, lastBeat, BackgroundChange(), true);
 
     if (RAND_BG_ENDS_AT_LAST_BEAT) {
       // end showing the static song background
@@ -726,7 +726,7 @@ void BackgroundImpl::LoadFromSong(const Song* pSong) {
     mainlayer.m_aBGChanges.erase(mainlayer.m_aBGChanges.begin() + i);
     --i;
 
-    LoadFromRandom(fStartBeat, fEndBeat, bgChange);
+    LoadFromRandom(fStartBeat, fEndBeat, bgChange, false);
   }
 
   // At this point, we shouldn't have any BGChanges to "".  "" is an invalid
