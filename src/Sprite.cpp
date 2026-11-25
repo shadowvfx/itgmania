@@ -473,9 +473,15 @@ void Sprite::Update(float fDelta) {
 
   UpdateAnimationState();
 
-  // If the texture is a movie, decode frames.
-  if (!bSkipThisMovieUpdate && m_DecodeMovie) {
-    m_pTexture->UpdateMovie(std::max(0.0f, fTimePassed));
+  // If the texture is a movie, decode frames. On the first update after
+  // play(), the elapsed time is stale (it covers time before the movie started
+  // or while it was off screen), so don't advance the movie. Still call
+  // UpdateMovie with 0 so a frame that is already due (e.g. frame 0) gets
+  // uploaded before this sprite is drawn, instead of drawing an empty or
+  // stale texture for a frame.
+  if (m_DecodeMovie) {
+    m_pTexture->UpdateMovie(
+        bSkipThisMovieUpdate ? 0.0f : std::max(0.0f, fTimePassed));
   }
 
   // update scrolling
