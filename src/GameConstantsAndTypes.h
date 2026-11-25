@@ -214,8 +214,12 @@ LuaDeclareType(SortOrder);
  * This function is mainly used for saving sort order to the profile. -aj
  */
 inline bool IsSongSort(SortOrder so) {
+  // Song sorts added after the course sorts in the enum (Series, Recent) must
+  // be listed here too, or choosing them never becomes the preferred sort and
+  // the wheel reverts to the previous sort after each song.
   return (so >= SORT_PREFERRED && so <= SORT_DOUBLE_CHALLENGE_METER) ||
-         so == SORT_LENGTH;
+         so == SORT_LENGTH || so == SORT_SERIES || so == SORT_RECENT ||
+         so == SORT_RECENT_P1 || so == SORT_RECENT_P2;
 }
 
 /** @brief The list of tap note scores available during play. */
