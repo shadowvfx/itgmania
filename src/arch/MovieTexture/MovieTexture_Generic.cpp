@@ -1,7 +1,9 @@
 #include "MovieTexture_Generic.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <thread>
@@ -319,18 +321,43 @@ void MovieTexture_Generic::UpdateMovie(float seconds) {
   }
   clock_ += seconds * rate_;
 
+  // After a rewind, wait until the decoder has actually restarted before
+  // reading frames; until then the cached frame 0 stays on screen.
+  if (decoder_->IsResetPending()) {
+    return;
+  }
+
+  // A looping movie has shown its last frame. Keep that frame up for its full
+  // duration, then wrap around, keeping any time left over so loops don't
+  // drift from the music.
+  if (pending_rollover_) {
+    if (clock_ < loop_length_) {
+      return;
+    }
+    pending_rollover_ = false;
+    decoder_->Rollover();
+    clock_ = loop_length_ > 0 ? std::fmod(clock_, loop_length_) : 0.0f;
+    next_frame_is_first_ = true;
+  }
+
   // If the frame isn't ready, don't update. This does mean the video
   // will "speed up" to catch up when decoding does outpace display.
   //
   // In practice, display should rarely, if ever, outpace decoding.
   if (decoder_->IsCurrentFrameReady() && CheckFrameTime() <= 0) {
     UpdateFrame();
-    return;
   }
 }
 
+float MovieTexture_Generic::FrameDuration() const {
+  if (frame_duration_ > 0 && frame_duration_ < 1.0f) {
+    return frame_duration_;
+  }
+  return 1.0f / 30.0f;  // Fallback if we haven't seen two frames yet.
+}
+
 void MovieTexture_Generic::UpdateFrame() {
-  if (finished_) {
+  if (finished_ || pending_rollover_) {
     return;
   }
 
@@ -344,45 +371,80 @@ void MovieTexture_Generic::UpdateFrame() {
     texture_lock_->Lock(iHandle, surface_);
   }
 
+  // How many frames we may drop in one update to catch up when the movie
+  // plays faster than the screen refreshes (high rate and/or music rate).
+  static const int kMaxCatchUpFrames = 8;
+
   int frame_ret = -1;
+  int frames_skipped = 0;
   // Our frame buffer should (almost) always be 50 ahead of our current frame to
   // display, which is when IsCurrentFrameReady will evaluate to false. This
   // loop will continue attempting to find a displayable frame until we hit that
   // limit. If we really can't find a frame after that, then the currently
   // displayed frame will appear stuck.
-  while (frame_ret < 0 && decoder_->IsCurrentFrameReady()) {
+  while (decoder_->IsCurrentFrameReady()) {
+    const float frame_ts = decoder_->GetTimestamp();
+    const bool is_first_frame = next_frame_is_first_;
     frame_ret = decoder_->GetFrame(surface_);
 
-    // Are we looping?
-    if (decoder_->EndOfMovie() && loop_) {
-      LOG->Info("File \"%s\" looping", GetID().filename.c_str());
-      decoder_->Rollover();
-      clock_ = 0.0;
-    } else if (decoder_->EndOfMovie()) {
-      // At the end of the movie, and not looping.
-      finished_ = true;
+    if (frame_ret >= 0) {
+      if (is_first_frame) {
+        next_frame_is_first_ = false;
+        CacheFirstFrame();
+      } else if (frame_ts > last_frame_ts_) {
+        const float gap = frame_ts - last_frame_ts_;
+        if (frame_duration_ <= 0 || gap < frame_duration_) {
+          frame_duration_ = gap;
+        }
+      }
+      last_frame_ts_ = frame_ts;
+    }
+
+    if (decoder_->EndOfMovie()) {
+      if (loop_) {
+        // Don't wrap yet: the last frame still has to be shown for its full
+        // duration. UpdateMovie wraps once the clock passes its end.
+        LOG->Info("File \"%s\" looping", GetID().filename.c_str());
+        pending_rollover_ = true;
+        loop_length_ = last_frame_ts_ + FrameDuration();
+      } else {
+        // At the end of the movie, and not looping.
+        finished_ = true;
+      }
+      break;
     }
 
     // If we failed to display the frame, it's getting skipped, advance the
     // clock.
     if (frame_ret < 0) {
       clock_ += (decoder_->GetTimestamp() - clock_);
+      continue;
     }
-  }
 
-  // There's an issue with the frame, make sure it does not get
-  // uploaded.
-  if (frame_ret < 0) {
-    if (texture_lock_ != nullptr) {
-      texture_lock_->Unlock(surface_, true);
+    // Catch up: if the next frame is already due as well, show that one
+    // instead of falling further behind.
+    if (frames_skipped < kMaxCatchUpFrames && decoder_->IsCurrentFrameReady() &&
+        CheckFrameTime() <= 0) {
+      ++frames_skipped;
+      continue;
     }
-    return;
+    break;
   }
 
   if (texture_lock_ != nullptr) {
     texture_lock_->Unlock(surface_, true);
   }
 
+  // There's an issue with the frame, make sure it does not get
+  // uploaded.
+  if (frame_ret < 0) {
+    return;
+  }
+
+  UploadSurface();
+}
+
+void MovieTexture_Generic::UploadSurface() {
   if (render_target_ != nullptr) {
     CHECKPOINT_M("About to upload the texture.");
 
@@ -400,6 +462,50 @@ void MovieTexture_Generic::UpdateFrame() {
       DISPLAY->UpdateTexture(
           texture_handle_, surface_, 0, 0, m_iImageWidth, m_iImageHeight);
     }
+  }
+}
+
+// Called right after frame 0 has been written into surface_ (while it is
+// still locked, if a texture lock is used).
+void MovieTexture_Generic::CacheFirstFrame() {
+  if (surface_ == nullptr || surface_->pixels == nullptr) {
+    return;
+  }
+  const std::size_t size =
+      static_cast<std::size_t>(surface_->pitch) * surface_->h;
+  first_frame_pixels_.resize(size);
+  std::memcpy(first_frame_pixels_.data(), surface_->pixels, size);
+}
+
+void MovieTexture_Generic::UploadCachedFirstFrame() {
+  if (first_frame_pixels_.empty() || surface_ == nullptr) {
+    return;
+  }
+
+  /* Just in case we were invalidated: */
+  CreateTexture();
+
+  if (texture_lock_ != nullptr) {
+    uintptr_t iHandle = intermediate_texture_ != nullptr
+                            ? intermediate_texture_->GetTexHandle()
+                            : this->GetTexHandle();
+    texture_lock_->Lock(iHandle, surface_);
+  }
+
+  const std::size_t size =
+      static_cast<std::size_t>(surface_->pitch) * surface_->h;
+  const bool ok =
+      surface_->pixels != nullptr && size == first_frame_pixels_.size();
+  if (ok) {
+    std::memcpy(surface_->pixels, first_frame_pixels_.data(), size);
+  }
+
+  if (texture_lock_ != nullptr) {
+    texture_lock_->Unlock(surface_, true);
+  }
+
+  if (ok) {
+    UploadSurface();
   }
 }
 
@@ -430,7 +536,15 @@ void MovieTexture_Generic::SetPosition(float seconds) {
 
   LOG->Trace("Seek to %f", seconds);
   clock_ = 0;
+  // A non-looping movie that reached its end must be able to play again.
+  finished_ = false;
+  pending_rollover_ = false;
+  next_frame_is_first_ = true;
+  last_frame_ts_ = 0;
   decoder_->Rewind();
+  // Put frame 0 on screen now, so nothing stale or blank shows while the
+  // decoder restarts in the background.
+  UploadCachedFirstFrame();
 }
 
 uintptr_t MovieTexture_Generic::GetTexHandle() const {

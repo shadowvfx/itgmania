@@ -132,6 +132,9 @@ class MovieDecoder_FFMpeg : public MovieDecoder {
   // The signal if the final frame of the movie was just displayed.
   bool EndOfMovie() { return end_of_movie_; }
 
+  // True from Rewind() until the decoding thread has handled the reset.
+  bool IsResetPending() const { return reset_; }
+
  private:
   void Init();
   std::string OpenCodec();

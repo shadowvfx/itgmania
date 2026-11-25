@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "MovieTexture.h"
 #include "RageTexture.h"
@@ -84,6 +85,10 @@ class MovieDecoder {
 
   // Returns true if the the final frame was displayed.
   virtual bool EndOfMovie() = 0;
+
+  // Returns true while a Rewind() is still being processed by the decoder,
+  // i.e. the frame buffer doesn't hold the restarted movie yet.
+  virtual bool IsResetPending() const { return false; }
 };
 
 class MovieTexture_Generic : public RageMovieTexture {
@@ -133,7 +138,26 @@ class MovieTexture_Generic : public RageMovieTexture {
   /* The time the movie is actually at: */
   float clock_;
 
+  // Looping: the last frame has been shown and stays up until clock_ reaches
+  // loop_length_ (its timestamp + one frame), then the movie wraps around.
+  bool pending_rollover_ = false;
+  float loop_length_ = 0;
+
+  // Timing of the frames we've displayed, used to work out the length of the
+  // last frame. frame_duration_ is the smallest gap seen between frames.
+  float last_frame_ts_ = 0;
+  float frame_duration_ = 0;
+  float FrameDuration() const;
+
+  // A copy of frame 0, so a rewind can show it immediately instead of a blank
+  // or stale texture while the decoder restarts.
+  bool next_frame_is_first_ = true;
+  std::vector<uint8_t> first_frame_pixels_;
+  void CacheFirstFrame();
+  void UploadCachedFirstFrame();
+
   void UpdateFrame();
+  void UploadSurface();
 
   void CreateTexture();
   void DestroyTexture();
