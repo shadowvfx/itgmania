@@ -122,7 +122,8 @@ class BackgroundImpl : public ActorFrame {
                              // may not be loaded into m_BGAnimations.
 
   void LoadFromRandom(
-      float fFirstBeat, float fEndBeat, const BackgroundChange& change, bool bUseRandomStartBeat);
+      float fFirstBeat, float fEndBeat, const BackgroundChange& change,
+      bool bUseRandomStartBeat);
   bool IsDangerAllVisible();
 
   class Layer {
@@ -149,6 +150,10 @@ class BackgroundImpl : public ActorFrame {
     int m_iCurBGChangeIndex;
     Actor* m_pCurrentBGA;
     Actor* m_pFadingBGA;
+    // True while m_pFadingBGA is playing a transition (e.g. CrossFade) and has
+    // not been sent "LoseFocus" yet. LoseFocus is held back until the
+    // transition finishes so the outgoing movie keeps playing while it fades.
+    bool m_bFadingNeedsLoseFocus;
   };
   Layer m_Layer[NUM_BackgroundLayer];
 
@@ -191,6 +196,7 @@ BackgroundImpl::Layer::Layer() {
   m_iCurBGChangeIndex = -1;
   m_pCurrentBGA = nullptr;
   m_pFadingBGA = nullptr;
+  m_bFadingNeedsLoseFocus = false;
 }
 
 void BackgroundImpl::Init() {
@@ -291,6 +297,7 @@ void BackgroundImpl::Layer::Unload() {
 
   m_pCurrentBGA = nullptr;
   m_pFadingBGA = nullptr;
+  m_bFadingNeedsLoseFocus = false;
   m_iCurBGChangeIndex = -1;
 }
 
@@ -480,7 +487,8 @@ BackgroundDef BackgroundImpl::Layer::CreateRandomBGA(
 }
 
 void BackgroundImpl::LoadFromRandom(
-    float fFirstBeat, float fEndBeat, const BackgroundChange& change, bool bUseRandomStartBeat) {
+    float fFirstBeat, float fEndBeat, const BackgroundChange& change,
+    bool bUseRandomStartBeat) {
   int iStartRow = BeatToNoteRow(fFirstBeat);
   int iEndRow = BeatToNoteRow(fEndBeat);
 
@@ -805,6 +813,11 @@ void BackgroundImpl::Layer::UpdateCurBGChange(
 
     const BackgroundChange& change = m_aBGChanges[i];
 
+    // A BGA that was still fading out from the previous change and never got
+    // its delayed LoseFocus. It's about to stop being drawn/updated.
+    Actor* pPendingLoseFocus = m_bFadingNeedsLoseFocus ? m_pFadingBGA : nullptr;
+    m_bFadingNeedsLoseFocus = false;
+
     m_pFadingBGA = m_pCurrentBGA;
 
     std::map<BackgroundDef, Actor*>::const_iterator iter =
@@ -822,13 +835,19 @@ void BackgroundImpl::Layer::UpdateCurBGChange(
 
     m_pCurrentBGA = iter->second;
 
+    // Send the held-back LoseFocus now, unless that BGA is coming straight
+    // back as the new current one (it will get On/GainFocus below instead).
+    if (pPendingLoseFocus != nullptr && pPendingLoseFocus != m_pCurrentBGA &&
+        pPendingLoseFocus != m_pFadingBGA) {
+      pPendingLoseFocus->PlayCommand("LoseFocus");
+    }
+
     if (m_pFadingBGA == m_pCurrentBGA) {
       m_pFadingBGA = nullptr;
       // LOG->Trace( "bg didn't actually change.  Ignoring." );
     } else {
       if (m_pFadingBGA) {
-        m_pFadingBGA->PlayCommand("LoseFocus");
-
+        bool bTransitioning = false;
         if (!change.m_sTransition.empty()) {
           std::map<std::string, BackgroundTransition>::const_iterator lIter =
               mapNameToTransition.find(change.m_sTransition);
@@ -840,7 +859,16 @@ void BackgroundImpl::Layer::UpdateCurBGChange(
             const BackgroundTransition& bt = lIter->second;
             m_pFadingBGA->RunCommandsOnLeaves(*bt.cmdLeaves);
             m_pFadingBGA->RunCommands(*bt.cmdRoot);
+            bTransitioning = true;
           }
+        }
+
+        if (bTransitioning) {
+          // Keep the outgoing BGA (e.g. a movie) playing while it fades out;
+          // LoseFocus is sent once the transition has finished (see below).
+          m_bFadingNeedsLoseFocus = true;
+        } else {
+          m_pFadingBGA->PlayCommand("LoseFocus");
         }
       }
     }
@@ -862,6 +890,10 @@ void BackgroundImpl::Layer::UpdateCurBGChange(
 
   if (m_pFadingBGA) {
     if (m_pFadingBGA->GetTweenTimeLeft() == 0) {
+      if (m_bFadingNeedsLoseFocus) {
+        m_bFadingNeedsLoseFocus = false;
+        m_pFadingBGA->PlayCommand("LoseFocus");
+      }
       m_pFadingBGA = nullptr;
     }
   }
