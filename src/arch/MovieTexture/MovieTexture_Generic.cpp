@@ -385,12 +385,15 @@ void MovieTexture_Generic::UpdateFrame() {
   while (decoder_->IsCurrentFrameReady()) {
     const float frame_ts = decoder_->GetTimestamp();
     const bool is_first_frame = next_frame_is_first_;
-    frame_ret = decoder_->GetFrame(surface_);
+    if (is_first_frame) {
+      frame_ret = GetFirstFrame();
+    } else {
+      frame_ret = decoder_->GetFrame(surface_);
+    }
 
     if (frame_ret >= 0) {
       if (is_first_frame) {
         next_frame_is_first_ = false;
-        CacheFirstFrame();
       } else if (frame_ts > last_frame_ts_) {
         const float gap = frame_ts - last_frame_ts_;
         if (frame_duration_ <= 0 || gap < frame_duration_) {
@@ -465,16 +468,31 @@ void MovieTexture_Generic::UploadSurface() {
   }
 }
 
-// Called right after frame 0 has been written into surface_ (while it is
-// still locked, if a texture lock is used).
-void MovieTexture_Generic::CacheFirstFrame() {
-  if (surface_ == nullptr || surface_->pixels == nullptr) {
-    return;
+// Decodes frame 0 and keeps a copy of it, so a rewind can show it right away.
+// When a texture lock is used, surface_->pixels points at write-only driver
+// memory that can't be read back, so decode into our own buffer first and
+// copy that into the locked memory.
+int MovieTexture_Generic::GetFirstFrame() {
+  if (surface_ == nullptr) {
+    return decoder_->GetFrame(surface_);
   }
   const std::size_t size =
       static_cast<std::size_t>(surface_->pitch) * surface_->h;
   first_frame_pixels_.resize(size);
-  std::memcpy(first_frame_pixels_.data(), surface_->pixels, size);
+
+  uint8_t* target = surface_->pixels;
+  surface_->pixels = first_frame_pixels_.data();
+  const int ret = decoder_->GetFrame(surface_);
+  surface_->pixels = target;
+
+  if (ret < 0) {
+    first_frame_pixels_.clear();
+    return ret;
+  }
+  if (target != nullptr) {
+    std::memcpy(target, first_frame_pixels_.data(), size);
+  }
+  return ret;
 }
 
 void MovieTexture_Generic::UploadCachedFirstFrame() {
@@ -531,6 +549,16 @@ void MovieTexture_Generic::SetPosition(float seconds) {
         "MovieTexture_Generic::SetPosition(%f): non-0 seeking unsupported; "
         "ignored",
         seconds);
+    return;
+  }
+
+  // Already at the start (nothing shown since the movie was loaded, rewound
+  // or wrapped around): frame 0 is next in line, so restarting the decoder
+  // would only throw it away and leave the screen blank until it's decoded
+  // again.
+  if (next_frame_is_first_ && !finished_ && !pending_rollover_ &&
+      !decoder_->IsResetPending()) {
+    clock_ = 0;
     return;
   }
 

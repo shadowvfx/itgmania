@@ -153,7 +153,7 @@ class MovieTexture_Generic : public RageMovieTexture {
   // or stale texture while the decoder restarts.
   bool next_frame_is_first_ = true;
   std::vector<uint8_t> first_frame_pixels_;
-  void CacheFirstFrame();
+  int GetFirstFrame();
   void UploadCachedFirstFrame();
 
   void UpdateFrame();
